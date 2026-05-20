@@ -1,0 +1,863 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CineTicket - ECS Fargate Microservices.
+  Two Fargate services (Movie + Booking) behind an ALB with path-based routing.
+  Cache-aside via ElastiCache Redis, DynamoDB conditional writes, RDS PostgreSQL,
+  SNS/SQS/Lambda notifications, and auto-scaling on the Booking Service.
+  See aws-ecs-fargate-console-guide.md for deployment steps.
+
+
+# ====================================================================
+# PARAMETERS
+# ====================================================================
+
+Parameters:
+
+  VpcStackName:
+    Type: String
+    Description: Name of the VPC CloudFormation stack to import subnets and VPC ID from.
+    Default: vpc-stack
+
+  VpcName:
+    Type: String
+    Description: Vpc1Name value used when the VPC stack was deployed (used in export names).
+    Default: VPC1
+
+  MovieImageUri:
+    Type: String
+    Description: >
+      ECR image URI for the Movie Service.
+      Example: 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-movies:latest
+      Leave as placeholder until you have pushed the image (guide Step 1).
+    Default: "REPLACE_WITH_MOVIE_IMAGE_URI"
+
+  BookingImageUri:
+    Type: String
+    Description: >
+      ECR image URI for the Booking Service.
+      Example: 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-bookings:latest
+      Leave as placeholder until you have pushed the image (guide Step 1).
+    Default: "REPLACE_WITH_BOOKING_IMAGE_URI"
+
+  NotificationEmail:
+    Type: String
+    Description: >
+      Email address used as both the SES sender and recipient for booking confirmations.
+      Must be verified in SES before the Lambda can send email (guide Step 5).
+    Default: "your-email@example.com"
+
+  DBMasterUsername:
+    Type: String
+    Description: PostgreSQL master username for RDS.
+    Default: cineticket
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+
+  AllowedAlbCidr:
+    Type: String
+    Description: CIDR allowed to reach the ALB on port 80. Use 0.0.0.0/0 for public access.
+    Default: "0.0.0.0/0"
+    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
+    ConstraintDescription: Must be a valid CIDR block (e.g. 0.0.0.0/0).
+
+
+# ====================================================================
+# RESOURCES
+# ====================================================================
+
+Resources:
+
+  # ====== SECURITY GROUPS ======
+
+  AlbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CineTicket ALB - allow HTTP from internet
+      VpcId: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedAlbCidr
+      Tags:
+        - Key: Name
+          Value: cineticket-alb-sg
+
+  MovieSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CineTicket Movie Service - allow 8080 from ALB and Booking Service
+      VpcId: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSG
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref BookingSG
+      Tags:
+        - Key: Name
+          Value: cineticket-movie-sg
+
+  BookingSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CineTicket Booking Service - allow 8080 from ALB
+      VpcId: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSG
+      Tags:
+        - Key: Name
+          Value: cineticket-booking-sg
+
+  RedisSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CineTicket Redis - allow 6379 from Movie Service only
+      VpcId: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref MovieSG
+      Tags:
+        - Key: Name
+          Value: cineticket-redis-sg
+
+  RdsSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CineTicket RDS - allow 5432 from Booking Service only
+      VpcId: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref BookingSG
+      Tags:
+        - Key: Name
+          Value: cineticket-rds-sg
+
+
+  # ====== DATA STORES — DYNAMODB ======
+
+  MoviesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cineticket-movies
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: movie_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: movie_id
+          KeyType: HASH
+
+  SeatMapsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cineticket-seats
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: movie_id
+          AttributeType: S
+        - AttributeName: seat_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: movie_id
+          KeyType: HASH
+        - AttributeName: seat_id
+          KeyType: RANGE
+
+
+  # ====== DATA STORES — RDS POSTGRESQL ======
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CineTicket RDS subnet group
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: "${VpcStackName}-${VpcName}-DbSubnetAId"
+        - !ImportValue
+          Fn::Sub: "${VpcStackName}-${VpcName}-DbSubnetBId"
+
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: cineticket/db
+      Description: CineTicket RDS PostgreSQL credentials
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DBMasterUsername}", "dbname": "cineticket"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\\'
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: cineticket-db
+      DBInstanceClass: db.t3.micro
+      Engine: postgres
+      EngineVersion: "16.13"
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:password}}"
+      DBName: cineticket
+      AllocatedStorage: "20"
+      StorageType: gp2
+      MultiAZ: false
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RdsSG
+      BackupRetentionPeriod: 0
+
+  # Attach the RDS endpoint back into the secret so the app can read host/port from one place
+  DBSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DBSecret
+      TargetId: !Ref RDSInstance
+      TargetType: AWS::RDS::DBInstance
+
+
+  # ====== DATA STORES — ELASTICACHE REDIS ======
+
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: CineTicket Redis subnet group
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: "${VpcStackName}-${VpcName}-PrivateSubnetAId"
+        - !ImportValue
+          Fn::Sub: "${VpcStackName}-${VpcName}-PrivateSubnetBId"
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      ClusterName: cineticket-redis
+      Engine: redis
+      CacheNodeType: cache.t3.micro
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref RedisSG
+
+
+  # ====== MESSAGING — SNS + SQS ======
+
+  OrderPlacedTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: cineticket-order-placed
+
+  NotificationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cineticket-notification-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cineticket-notification-queue
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NotificationDLQ.Arn
+        maxReceiveCount: 3
+
+  NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref NotificationQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderPlacedTopic
+
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderPlacedTopic
+      Protocol: sqs
+      Endpoint: !GetAtt NotificationQueue.Arn
+
+
+  # ====== NOTIFICATION LAMBDA ======
+
+  NotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cineticket-notification-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cineticket-notification-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt NotificationQueue.Arn
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: "*"
+
+  NotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cineticket-notification
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt NotificationLambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SENDER_EMAIL: !Ref NotificationEmail
+      Code:
+        ZipFile: |
+          import json, logging, os, boto3
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+          ses = boto3.client("ses")
+          SENDER_EMAIL = os.environ["SENDER_EMAIL"]
+          def lambda_handler(event, context):
+              for record in event["Records"]:
+                  body    = json.loads(record["body"])
+                  message = json.loads(body["Message"])
+                  booking_id     = message.get("booking_id", "N/A")
+                  movie_id       = message.get("movie_id", "N/A")
+                  seat_id        = message.get("seat_id", "N/A")
+                  customer_email = message.get("customer_email")
+                  if not customer_email:
+                      continue
+                  ses.send_email(
+                      Source=SENDER_EMAIL,
+                      Destination={"ToAddresses": [customer_email]},
+                      Message={
+                          "Subject": {"Data": "Your CineTicket booking is confirmed!"},
+                          "Body": {"Text": {"Data":
+                              f"Booking ID : {booking_id}\nMovie      : {movie_id}\nSeat       : {seat_id}\n\nEnjoy the show!"
+                          }},
+                      },
+                  )
+                  log.info("sent to %s for booking %s", customer_email, booking_id)
+              return {"statusCode": 200}
+
+  NotificationEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !GetAtt NotificationFunction.Arn
+      EventSourceArn: !GetAtt NotificationQueue.Arn
+      BatchSize: 5
+      Enabled: true
+
+
+  # ====== CLOUDWATCH LOG GROUPS ======
+
+  MovieServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/cineticket-movies
+      RetentionInDays: 14
+
+  BookingServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/cineticket-bookings
+      RetentionInDays: 14
+
+
+  # ====== ECS — IAM ROLES ======
+
+  ECSTaskExecutionRole:
+    # Used by the ECS agent to pull images from ECR and write logs to CloudWatch.
+    # This role is the same for both services.
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cineticket-ecs-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  MovieTaskRole:
+    # Used by the Movie Service container code (DynamoDB reads + Redis).
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cineticket-movie-task-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cineticket-movie-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt MoviesTable.Arn
+                  - !GetAtt SeatMapsTable.Arn
+
+  BookingTaskRole:
+    # Used by the Booking Service container code (DynamoDB write + RDS + SNS).
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cineticket-booking-task-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cineticket-booking-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt SeatMapsTable.Arn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecret
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref OrderPlacedTopic
+
+
+  # ====== ECS — CLUSTER & SERVICE DISCOVERY ======
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: cineticket-cluster
+
+  PrivateDnsNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: cineticket.local
+      Vpc: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+
+  MovieDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: movies
+      NamespaceId: !Ref PrivateDnsNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+
+  BookingDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: bookings
+      NamespaceId: !Ref PrivateDnsNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+
+
+  # ====== ECS — TASK DEFINITIONS ======
+
+  MovieTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: cineticket-movies
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt MovieTaskRole.Arn
+      ContainerDefinitions:
+        - Name: movie-service
+          Image: !Ref MovieImageUri
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: DYNAMODB_TABLE_MOVIES
+              Value: !Ref MoviesTable
+            - Name: DYNAMODB_TABLE_SEATS
+              Value: !Ref SeatMapsTable
+            - Name: REDIS_HOST
+              Value: !GetAtt RedisCluster.RedisEndpoint.Address
+            - Name: REDIS_PORT
+              Value: "6379"
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MovieServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: movie
+          HealthCheck:
+            Command: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\" || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  BookingTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: cineticket-bookings
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt BookingTaskRole.Arn
+      ContainerDefinitions:
+        - Name: booking-service
+          Image: !Ref BookingImageUri
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: DB_SECRET_NAME
+              Value: !Ref DBSecret
+            - Name: MOVIE_SERVICE_URL
+              Value: !Sub "http://${ALB.DNSName}"
+            - Name: SNS_TOPIC_ARN
+              Value: !Ref OrderPlacedTopic
+            - Name: DYNAMODB_TABLE_SEATS
+              Value: !Ref SeatMapsTable
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BookingServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: booking
+          HealthCheck:
+            Command: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\" || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+
+  # ====== ALB — LOAD BALANCER, TARGET GROUPS, ROUTING ======
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cineticket-alb
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref AlbSG
+      Subnets:
+        - !ImportValue
+          Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetAId"
+        - !ImportValue
+          Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetBId"
+
+  MovieTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cineticket-movie-tg
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  BookingTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cineticket-booking-tg
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: text/plain
+            MessageBody: "Not found. Use /movies or /bookings"
+
+  MovieListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ["/movies", "/movies/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref MovieTargetGroup
+
+  BookingListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ["/bookings", "/bookings/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BookingTargetGroup
+
+
+  # ====== ECS — SERVICES ======
+
+  MovieService:
+    Type: AWS::ECS::Service
+    DependsOn: MovieListenerRule
+    Properties:
+      ServiceName: cineticket-movie-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref MovieTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !ImportValue
+              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetAId"
+            - !ImportValue
+              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetBId"
+          SecurityGroups:
+            - !Ref MovieSG
+      LoadBalancers:
+        - ContainerName: movie-service
+          ContainerPort: 8080
+          TargetGroupArn: !Ref MovieTargetGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt MovieDiscoveryService.Arn
+
+  BookingService:
+    Type: AWS::ECS::Service
+    DependsOn: BookingListenerRule
+    Properties:
+      ServiceName: cineticket-booking-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref BookingTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !ImportValue
+              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetAId"
+            - !ImportValue
+              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetBId"
+          SecurityGroups:
+            - !Ref BookingSG
+      LoadBalancers:
+        - ContainerName: booking-service
+          ContainerPort: 8080
+          TargetGroupArn: !Ref BookingTargetGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt BookingDiscoveryService.Arn
+
+
+  # ====== AUTO SCALING — BOOKING SERVICE ======
+  # Teaching point: Movie Service handles mostly reads (cache hits) so it stays at 1 task.
+  # Booking Service handles writes and RDS connections — scale it up when CPU hits 60%.
+
+  BookingScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: BookingService
+    Properties:
+      MaxCapacity: 3
+      MinCapacity: 1
+      ResourceId: !Sub "service/${ECSCluster}/cineticket-booking-service"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  BookingScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: cineticket-booking-cpu-scaling
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref BookingScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60.0
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 60
+
+
+  # ====== S3 WEB HOSTING ======
+
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "cineticket-web-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::cineticket-web-${AWS::AccountId}/*"
+
+
+# ====================================================================
+# OUTPUTS
+# ====================================================================
+
+Outputs:
+
+  AlbDnsName:
+    Description: >
+      ALB public DNS name. Paste this into the web UI as the API Base URL.
+      Example: http://cineticket-alb-1234567890.us-east-1.elb.amazonaws.com
+    Value: !Sub "http://${ALB.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-AlbDnsName"
+
+  MovieRepoUri:
+    Description: ECR URI for Movie Service - use in docker tag and docker push commands.
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cineticket-movies"
+    Export:
+      Name: !Sub "${AWS::StackName}-MovieRepoUri"
+
+  BookingRepoUri:
+    Description: ECR URI for Booking Service - use in docker tag and docker push commands.
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cineticket-bookings"
+    Export:
+      Name: !Sub "${AWS::StackName}-BookingRepoUri"
+
+  DynamoMoviesTable:
+    Description: DynamoDB table name for movies.
+    Value: !Ref MoviesTable
+
+  DynamoSeatsTable:
+    Description: DynamoDB table name for seat maps.
+    Value: !Ref SeatMapsTable
+
+  RDSEndpoint:
+    Description: RDS PostgreSQL endpoint hostname.
+    Value: !GetAtt RDSInstance.Endpoint.Address
+
+  RedisEndpoint:
+    Description: ElastiCache Redis primary endpoint hostname.
+    Value: !GetAtt RedisCluster.RedisEndpoint.Address
+
+  DBSecretArn:
+    Description: Secrets Manager ARN for RDS credentials.
+    Value: !Ref DBSecret
+
+  SnsTopicArn:
+    Description: SNS topic ARN for OrderPlaced events.
+    Value: !Ref OrderPlacedTopic
+
+  NotificationQueueUrl:
+    Description: SQS queue URL for the notification queue.
+    Value: !Ref NotificationQueue
+
+  NotificationDlqUrl:
+    Description: SQS dead-letter queue URL - check here if emails are not arriving.
+    Value: !Ref NotificationDLQ
+
+  ECSClusterName:
+    Description: ECS cluster name - use for aws ecs commands and console navigation.
+    Value: !Ref ECSCluster
+
+  S3WebsiteUrl:
+    Description: >
+      S3 static website URL for the web UI. Open this in a browser, then paste the
+      AlbDnsName value into the API Configuration card to connect the UI to the backend.
+    Value: !Sub "http://cineticket-web-${AWS::AccountId}.s3-website-${AWS::Region}.amazonaws.com"

@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CineTicket</title>
+  <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" />
+  <style>
+    body { background: #0d0d1a; color: #e0e0e0; }
+    .navbar { background: #1a1a2e !important; }
+    .navbar-brand { color: #e94560 !important; font-weight: bold; font-size: 1.5rem; }
+    .card { background: #1a1a2e; border: 1px solid #2a2a4a; color: #e0e0e0; }
+    .card-header { background: #2a2a4a; font-weight: 600; }
+    .btn-primary { background: #e94560; border-color: #e94560; }
+    .btn-primary:hover { background: #c73652; border-color: #c73652; }
+    .btn-outline-secondary { color: #aaa; border-color: #444; }
+    .btn-outline-secondary:hover { background: #2a2a4a; color: #fff; border-color: #555; }
+    .btn-outline-secondary.active { background: #2a2a4a; color: #fff; border-color: #e94560; }
+    .badge-available { background: #28a745; }
+    .badge-booked { background: #dc3545; }
+    #toast { position: fixed; bottom: 20px; right: 20px; min-width: 280px; z-index: 9999; display: none; }
+    .seat-map span { display: inline-block; margin: 2px; padding: 4px 8px; border-radius: 4px;
+                     font-size: 0.8rem; cursor: pointer; }
+    .seat-available { background: #28a745; color: white; }
+    .seat-booked { background: #dc3545; color: white; cursor: default; }
+
+    /* Response panel */
+    #responsePanel { background: #111122; border: 1px solid #2a2a4a; border-radius: 6px; }
+    #responsePanel .panel-header { background: #1a1a2e; border-bottom: 1px solid #2a2a4a;
+                                    padding: 8px 14px; display: flex; align-items: center; gap: 8px; }
+    #responsePanel .panel-header span { font-weight: 600; font-size: 0.9rem; flex: 1; }
+    pre#rawOutput { background: #0a0a15; color: #a8ff78; padding: 14px; border-radius: 0 0 6px 6px;
+                    font-size: 0.8rem; margin: 0; max-height: 380px; overflow-y: auto; }
+    #prettyOutput { padding: 14px; max-height: 380px; overflow-y: auto; }
+    .hidden { display: none !important; }
+
+    /* Pretty response elements */
+    .status-pill { display: inline-block; padding: 2px 10px; border-radius: 12px;
+                   font-size: 0.75rem; font-weight: 700; margin-bottom: 10px; }
+    .status-ok  { background: #1a4731; color: #4ade80; border: 1px solid #166534; }
+    .status-err { background: #4a1a1a; color: #f87171; border: 1px solid #991b1b; }
+    .pretty-table { width: 100%; font-size: 0.82rem; border-collapse: collapse; }
+    .pretty-table td { padding: 4px 8px; border-bottom: 1px solid #1e1e38; vertical-align: top; }
+    .pretty-table td:first-child { color: #94a3b8; width: 38%; font-family: monospace; }
+    .pretty-table td:last-child { color: #e2e8f0; word-break: break-all; }
+    .pretty-section { margin-bottom: 10px; }
+    .pretty-label { font-size: 0.7rem; text-transform: uppercase; color: #64748b;
+                    letter-spacing: 0.05em; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark">
+  <span class="navbar-brand">🎬 CineTicket</span>
+  <small class="text-muted">ECS Fargate Microservices Demo</small>
+</nav>
+
+<div class="container mt-4">
+
+  <!-- API BASE URL CONFIG -->
+  <div class="card mb-4">
+    <div class="card-header">⚙️ API Configuration</div>
+    <div class="card-body">
+      <div class="form-row align-items-center">
+        <div class="col-md-8">
+          <input id="apiBase" type="text" class="form-control"
+                 placeholder="http://cineticket-alb-xxxx.us-east-1.elb.amazonaws.com" />
+          <small class="text-muted">Paste the <strong>AlbDnsName</strong> CloudFormation output here.</small>
+        </div>
+        <div class="col-md-4 mt-2 mt-md-0">
+          <button class="btn btn-primary btn-block" onclick="saveBase()">Save &amp; Connect</button>
+        </div>
+      </div>
+      <div id="connectionStatus" class="mt-2"></div>
+    </div>
+  </div>
+
+  <div class="row">
+
+    <!-- BROWSE MOVIES -->
+    <div class="col-md-6 mb-4">
+      <div class="card h-100">
+        <div class="card-header">🎥 Browse Movies</div>
+        <div class="card-body">
+          <button class="btn btn-primary btn-sm mb-3" onclick="loadMovies()">Refresh Movies</button>
+          <div id="movieList">
+            <p class="text-muted">Click "Refresh Movies" to load.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SEAT MAP -->
+    <div class="col-md-6 mb-4">
+      <div class="card h-100">
+        <div class="card-header">💺 Seat Map</div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Movie ID</label>
+            <input id="seatMapMovieId" type="text" class="form-control" placeholder="e.g. inception-2024" />
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="loadSeatMap()">Load Seat Map</button>
+          <p class="small text-muted mt-1">Reload after booking to see cache invalidation in action.</p>
+          <div id="seatMapDisplay" class="seat-map mt-3"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- BOOK A SEAT -->
+    <div class="col-md-6 mb-4">
+      <div class="card h-100">
+        <div class="card-header">🎟️ Book a Seat</div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Movie ID</label>
+            <input id="bookMovieId" type="text" class="form-control" placeholder="e.g. inception-2024" />
+          </div>
+          <div class="form-group">
+            <label>Seat ID</label>
+            <input id="bookSeatId" type="text" class="form-control" placeholder="e.g. A1" />
+          </div>
+          <div class="form-group">
+            <label>Your Email</label>
+            <input id="bookEmail" type="email" class="form-control" placeholder="you@example.com" />
+            <small class="text-muted">Must be SES-verified in sandbox mode.</small>
+          </div>
+          <button class="btn btn-primary btn-block" onclick="bookSeat()">Book Seat</button>
+          <hr />
+          <h6 class="text-warning">Race Condition Demo</h6>
+          <p class="small text-muted">Fires two requests simultaneously — one wins, one gets 409.</p>
+          <button class="btn btn-warning btn-sm btn-block" onclick="raceConditionDemo()">Book Same Seat Twice</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- LOOKUP + CANCEL -->
+    <div class="col-md-6 mb-4">
+      <div class="card h-100">
+        <div class="card-header">🔍 Lookup &amp; Cancel Booking</div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Booking ID</label>
+            <input id="lookupId" type="text" class="form-control" placeholder="Paste booking_id here" />
+          </div>
+          <div class="d-flex" style="gap:8px;">
+            <button class="btn btn-primary flex-fill" onclick="lookupBooking()">Lookup</button>
+            <button class="btn btn-danger flex-fill" onclick="cancelBooking()">Cancel &amp; Release Seat</button>
+          </div>
+          <p class="small text-muted mt-2">Cancel returns the seat to the available pool and invalidates the cache.</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- SHARED RESPONSE PANEL -->
+  <div id="responsePanel" class="mb-5">
+    <div class="panel-header">
+      <span>API Response</span>
+      <button id="prettyBtn" class="btn btn-sm btn-outline-secondary active" onclick="setMode('pretty')">Pretty</button>
+      <button id="rawBtn"    class="btn btn-sm btn-outline-secondary"        onclick="setMode('raw')">Raw JSON</button>
+    </div>
+    <div id="prettyOutput">
+      <p class="text-muted" style="padding:14px;margin:0;">Run any action above to see the response here.</p>
+    </div>
+    <pre id="rawOutput" class="hidden">Run any action above to see the response here.</pre>
+  </div>
+
+</div>
+
+<!-- TOAST -->
+<div id="toast" class="alert" role="alert"></div>
+
+<script>
+  const API_KEY  = "cineticket_api_base_url";
+  const MODE_KEY = "cineticket_response_mode";
+
+  let lastPayload  = null;
+  let responseMode = localStorage.getItem(MODE_KEY) || "pretty";
+
+  // ---- init ----
+  setMode(responseMode);
+
+  window.addEventListener("load", () => {
+    const saved = getBase();
+    if (saved) {
+      document.getElementById("apiBase").value = saved;
+      testConnection(saved);
+    }
+  });
+
+  // ---- helpers ----
+  function getBase() { return (localStorage.getItem(API_KEY) || "").replace(/\/$/, ""); }
+
+  function saveBase() {
+    const val = document.getElementById("apiBase").value.trim().replace(/\/$/, "");
+    localStorage.setItem(API_KEY, val);
+    showToast("API Base URL saved. Testing connection…", "info");
+    testConnection(val);
+  }
+
+  function testConnection(base) {
+    fetch(base + "/movies")
+      .then(r => {
+        document.getElementById("connectionStatus").innerHTML =
+          r.ok ? '<span class="badge badge-success">Connected ✓</span>'
+               : '<span class="badge badge-danger">Error ' + r.status + '</span>';
+      })
+      .catch(() => {
+        document.getElementById("connectionStatus").innerHTML =
+          '<span class="badge badge-danger">Cannot reach ALB — check URL</span>';
+      });
+  }
+
+  function showToast(msg, type) {
+    const t = document.getElementById("toast");
+    t.className = "alert alert-" + (type || "info");
+    t.textContent = msg;
+    t.style.display = "block";
+    setTimeout(() => { t.style.display = "none"; }, 4000);
+  }
+
+  // ---- response panel ----
+  function setMode(mode) {
+    responseMode = mode;
+    localStorage.setItem(MODE_KEY, mode);
+    const isPretty = mode === "pretty";
+    document.getElementById("prettyBtn").classList.toggle("active", isPretty);
+    document.getElementById("rawBtn").classList.toggle("active", !isPretty);
+    document.getElementById("prettyOutput").classList.toggle("hidden", !isPretty);
+    document.getElementById("rawOutput").classList.toggle("hidden", isPretty);
+    if (lastPayload) render(lastPayload);
+  }
+
+  function render(payload) {
+    lastPayload = payload;
+    document.getElementById("rawOutput").textContent = JSON.stringify(payload, null, 2);
+    document.getElementById("prettyOutput").innerHTML = renderPretty(payload);
+  }
+
+  function renderPretty(payload) {
+    if (payload._raceDemo) return renderRacePretty(payload);
+
+    const status = payload.status;
+    const ok     = status >= 200 && status < 300;
+    const data   = payload.response;
+
+    let html = `<div class="pretty-section">
+      <span class="status-pill ${ok ? "status-ok" : "status-err"}">HTTP ${esc(String(status))}</span>
+      <span class="text-muted" style="font-size:.8rem;margin-left:6px;">${esc(payload.method)} ${esc(payload.url)}</span>
+    </div>`;
+
+    if (!data) return html + '<p class="text-muted" style="font-size:.85rem;">No response body.</p>';
+    if (typeof data !== "object") return html + `<pre style="margin:0;font-size:.8rem;">${esc(String(data))}</pre>`;
+
+    // error shortcut
+    if (data.error) {
+      return html + `<div class="alert alert-danger p-2" style="font-size:.85rem;">${esc(data.error)}</div>`;
+    }
+
+    // special pretty renderers per endpoint shape
+    if (Array.isArray(data)) return html + renderMovieList(data);
+    if (data.seat_map)        return html + renderMovieDetail(data);
+    if (data.booking_id && data.status === "confirmed") return html + renderBookingConfirm(data);
+    if (data.booking_id && data.movie_id && data.seat_id && data.booked_at) return html + renderBookingLookup(data);
+    if (data.message === "booking cancelled") return html + renderCancellation(data);
+
+    // fallback: generic key-value table
+    return html + genericTable(data);
+  }
+
+  function renderMovieList(movies) {
+    if (!movies.length) return '<p class="text-muted">No movies returned.</p>';
+    return movies.map(m => `
+      <div class="pretty-section" style="border:1px solid #2a2a4a;border-radius:4px;padding:8px;margin-bottom:6px;">
+        <strong>${esc(m.title)}</strong>
+        <span class="badge badge-secondary ml-2" style="font-size:.7rem;">${esc(m.genre || "")}</span><br/>
+        <small class="text-muted">ID: <code>${esc(m.movie_id)}</code></small><br/>
+        <small>${(m.showtimes || []).map(esc).join(" · ")}</small>
+      </div>`).join("");
+  }
+
+  function renderMovieDetail(movie) {
+    const seats = movie.seat_map || {};
+    const seatHtml = Object.entries(seats).map(([s, st]) =>
+      `<span class="seat-${st}" onclick="fillSeat('${esc(movie.movie_id)}','${esc(s)}')" title="${st}">${esc(s)}</span>`
+    ).join("");
+    return `
+      <div class="pretty-section">
+        <strong style="font-size:1rem;">${esc(movie.title)}</strong>
+        <span class="badge badge-secondary ml-2">${esc(movie.genre || "")}</span><br/>
+        <small class="text-muted">Director: ${esc(movie.director || "—")}</small>
+      </div>
+      <div class="pretty-label">Seats</div>
+      <div class="seat-map pretty-section">${seatHtml || '<span class="text-muted">No seats found.</span>'}</div>`;
+  }
+
+  function renderBookingConfirm(data) {
+    return `
+      <div class="alert alert-success p-2 mb-2" style="font-size:.85rem;">
+        ✅ Booking confirmed! Check your email in ~10 seconds.
+      </div>
+      <table class="pretty-table"><tbody>
+        <tr><td>Booking ID</td><td><code>${esc(data.booking_id)}</code></td></tr>
+        <tr><td>Movie</td><td>${esc(data.movie_id)}</td></tr>
+        <tr><td>Seat</td><td><strong>${esc(data.seat_id)}</strong></td></tr>
+        <tr><td>Status</td><td><span class="badge badge-success">${esc(data.status)}</span></td></tr>
+      </tbody></table>`;
+  }
+
+  function renderBookingLookup(data) {
+    return `
+      <div class="pretty-label">Booking Record</div>
+      <table class="pretty-table"><tbody>
+        <tr><td>Booking ID</td><td><code>${esc(data.booking_id)}</code></td></tr>
+        <tr><td>Movie</td><td>${esc(data.movie_id)}</td></tr>
+        <tr><td>Seat</td><td><strong>${esc(data.seat_id)}</strong></td></tr>
+        <tr><td>Customer</td><td>${esc(data.customer_email)}</td></tr>
+        <tr><td>Booked at</td><td>${esc(data.booked_at)}</td></tr>
+      </tbody></table>`;
+  }
+
+  function renderCancellation(data) {
+    return `
+      <div class="alert alert-warning p-2 mb-2" style="font-size:.85rem;">
+        🔓 Booking cancelled — seat returned to the available pool.
+      </div>
+      <table class="pretty-table"><tbody>
+        <tr><td>Booking ID</td><td><code>${esc(data.booking_id)}</code></td></tr>
+        <tr><td>Movie</td><td>${esc(data.movie_id)}</td></tr>
+        <tr><td>Seat</td><td><strong>${esc(data.seat_id)}</strong></td></tr>
+        <tr><td>Status</td><td><span class="badge badge-warning text-dark">${esc(data.status)}</span></td></tr>
+      </tbody></table>`;
+  }
+
+  function renderRacePretty(payload) {
+    const r1 = payload.r1, r2 = payload.r2;
+    function pill(r) {
+      const ok = r.status >= 200 && r.status < 300;
+      return `<span class="status-pill ${ok ? "status-ok" : "status-err"}">HTTP ${r.status}</span>`;
+    }
+    return `
+      <div class="pretty-label">Race Condition Demo — two simultaneous POST /bookings requests</div>
+      <div class="row">
+        <div class="col-6">
+          <div class="pretty-label">Request 1</div>
+          ${pill(r1)} ${r1.status === 201 ? "✅ Won the race" : "❌ Lost — seat already taken"}<br/>
+          <small>${esc(JSON.stringify(r1.body))}</small>
+        </div>
+        <div class="col-6">
+          <div class="pretty-label">Request 2</div>
+          ${pill(r2)} ${r2.status === 201 ? "✅ Won the race" : "❌ 409 — DynamoDB conditional write blocked it"}<br/>
+          <small>${esc(JSON.stringify(r2.body))}</small>
+        </div>
+      </div>
+      <div class="alert alert-info p-2 mt-2" style="font-size:.8rem;">
+        <strong>Teaching point:</strong> Only one request can satisfy <code>status = "available"</code> → <code>"booked"</code>.
+        The other gets <code>ConditionalCheckFailedException</code> → 409.
+      </div>`;
+  }
+
+  function genericTable(obj) {
+    const rows = Object.entries(obj).map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td>${esc(typeof v === "object" ? JSON.stringify(v) : String(v))}</td></tr>`
+    ).join("");
+    return `<table class="pretty-table"><tbody>${rows}</tbody></table>`;
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  // ---- API actions ----
+
+  function loadMovies() {
+    const base = getBase();
+    if (!base) { showToast("Set API Base URL first", "warning"); return; }
+    fetch(base + "/movies")
+      .then(async r => {
+        const data = await r.json();
+        render({ method: "GET", url: base + "/movies", status: r.status, response: data });
+        if (r.ok && data.length) {
+          const el = document.getElementById("movieList");
+          el.innerHTML = data.map(m => `
+            <div class="mb-2 p-2" style="border:1px solid #2a2a4a;border-radius:4px;">
+              <strong>${esc(m.title)}</strong>
+              <span class="badge badge-secondary ml-2">${esc(m.genre || "")}</span><br/>
+              <small class="text-muted">ID: <code>${esc(m.movie_id)}</code></small><br/>
+              <small>${(m.showtimes || []).map(esc).join(" · ")}</small>
+            </div>`).join("");
+        } else if (r.ok) {
+          document.getElementById("movieList").innerHTML = "<p class='text-muted'>No movies. Seed DynamoDB first.</p>";
+        }
+      })
+      .catch(e => { render({ method: "GET", url: base + "/movies", status: 0, response: { error: String(e) } }); });
+  }
+
+  function bookSeat() {
+    const base = getBase();
+    if (!base) { showToast("Set API Base URL first", "warning"); return; }
+    const payload = {
+      movie_id:       document.getElementById("bookMovieId").value.trim(),
+      seat_id:        document.getElementById("bookSeatId").value.trim(),
+      customer_email: document.getElementById("bookEmail").value.trim(),
+    };
+    const url = base + "/bookings";
+    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+      .then(async r => {
+        const data = await r.json();
+        render({ method: "POST", url, status: r.status, response: data });
+        if (r.status === 201) {
+          showToast("Booking confirmed! Check email in ~10s.", "success");
+          document.getElementById("lookupId").value = data.booking_id;
+        } else if (r.status === 409) {
+          showToast("409 — Seat already taken (race condition caught!)", "danger");
+        } else {
+          showToast("Error " + r.status, "danger");
+        }
+      })
+      .catch(e => { render({ method: "POST", url, status: 0, response: { error: String(e) } }); });
+  }
+
+  function raceConditionDemo() {
+    const base = getBase();
+    if (!base) { showToast("Set API Base URL first", "warning"); return; }
+    const payload = {
+      movie_id:       document.getElementById("bookMovieId").value.trim() || "inception-2024",
+      seat_id:        document.getElementById("bookSeatId").value.trim() || "A1",
+      customer_email: document.getElementById("bookEmail").value.trim() || "demo@example.com",
+    };
+    const url = base + "/bookings";
+    const req = () => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+      .then(async r => ({ status: r.status, body: await r.json() }));
+
+    Promise.all([req(), req()]).then(([r1, r2]) => {
+      render({ _raceDemo: true, r1, r2 });
+      showToast("One won, one got 409 — DynamoDB conditional write in action!", "warning");
+    });
+  }
+
+  function lookupBooking() {
+    const base = getBase();
+    if (!base) { showToast("Set API Base URL first", "warning"); return; }
+    const id = document.getElementById("lookupId").value.trim();
+    if (!id) { showToast("Enter a booking ID", "warning"); return; }
+    const url = base + "/bookings/" + id;
+    fetch(url)
+      .then(async r => {
+        const data = await r.json();
+        render({ method: "GET", url, status: r.status, response: data });
+      })
+      .catch(e => { render({ method: "GET", url, status: 0, response: { error: String(e) } }); });
+  }
+
+  function cancelBooking() {
+    const base = getBase();
+    if (!base) { showToast("Set API Base URL first", "warning"); return; }
+    const id = document.getElementById("lookupId").value.trim();
+    if (!id) { showToast("Enter a booking ID to cancel", "warning"); return; }
+    const url = base + "/bookings/" + id;
+    fetch(url, { method: "DELETE" })
+      .then(async r => {
+        const data = await r.json();
+        render({ method: "DELETE", url, status: r.status, response: data });
+        if (r.ok) {
+          showToast("Seat released back to pool.", "success");
+          document.getElementById("lookupId").value = "";
+        } else {
+          showToast("Cancel failed: " + r.status, "danger");
+        }
+      })
+      .catch(e => { render({ method: "DELETE", url, status: 0, response: { error: String(e) } }); });
+  }
+
+  function loadSeatMap() {
+    const base = getBase();
+    if (!base) { showToast("Set API Base URL first", "warning"); return; }
+    const id = document.getElementById("seatMapMovieId").value.trim();
+    if (!id) { showToast("Enter a movie ID", "warning"); return; }
+    const url = base + "/movies/" + id;
+    fetch(url)
+      .then(async r => {
+        const data = await r.json();
+        render({ method: "GET", url, status: r.status, response: data });
+        if (!r.ok) { document.getElementById("seatMapDisplay").innerHTML = "<p class='text-danger'>Movie not found</p>"; return; }
+        const map = data.seat_map || {};
+        const el  = document.getElementById("seatMapDisplay");
+        if (!Object.keys(map).length) { el.innerHTML = "<p class='text-muted'>No seats found.</p>"; return; }
+        el.innerHTML = "<p><strong>" + esc(data.title) + "</strong></p>" +
+          Object.entries(map).map(([seat, status]) =>
+            `<span class="seat-${status}" onclick="fillSeat('${esc(id)}','${esc(seat)}')" title="${status}">${esc(seat)}</span>`
+          ).join("");
+      });
+  }
+
+  function fillSeat(movieId, seatId) {
+    document.getElementById("bookMovieId").value = movieId;
+    document.getElementById("seatMapMovieId").value = movieId;
+    document.getElementById("bookSeatId").value = seatId;
+    showToast("Filled seat " + seatId + " — now click Book Seat", "info");
+  }
+</script>
+</body>
+</html>
