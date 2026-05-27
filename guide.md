@@ -3,7 +3,7 @@
 Step-by-step ClickOps walkthrough for building a two-service containerised cinema booking platform. Follow the sections in order — each one depends on the previous.
 
 **Assumed starting point:**
-- The VPC stack from `CF/VPC - Cidr + GetAz + OutPuts + DB Subnets.yaml` is deployed. Note its **stack name** and the **Vpc1Name** value used (default: `VPC1`). The stack exports public subnets, private subnets, and DB subnets — all three tiers are used here.
+- This project is self-contained — no external VPC stack is required. The click-ops walkthrough (§0 below) or the CloudFormation template (Appendix A) both provision the VPC, subnets, IGW, and route table as part of this deployment.
 - AWS CLI is configured: `aws configure` with region `us-east-1`.
 - Docker Desktop is installed and running.
 - You are working from the `CineTicket - ECS Fargate Microservices/` project folder.
@@ -16,6 +16,7 @@ Step-by-step ClickOps walkthrough for building a two-service containerised cinem
 
 | # | Service | Resource | Name |
 |---|---|---|---|
+| 0 | VPC | VPC · IGW · 6 subnets · public route table | `cineticket-vpc` |
 | 1 | EC2 → Security Groups | ALB, Movie, Booking, Redis, RDS security groups | `cineticket-*-sg` |
 | 2 | DynamoDB | Movies catalogue table | `cineticket-movies` |
 | 3 | DynamoDB | Seat availability table | `cineticket-seats` |
@@ -41,6 +42,107 @@ Step-by-step ClickOps walkthrough for building a two-service containerised cinem
 
 ---
 
+## 0. Create the VPC and Subnets
+
+This section creates the network foundation: one VPC, an Internet Gateway, six subnets across two AZs (public / private / DB tiers), and a public route table. The private and DB subnets use the VPC's implicit main route table — local routing only, no NAT.
+
+> **Note — no NAT Gateway:** Fargate tasks run in public subnets with **Auto-assign public IP: ENABLED** so they can reach ECR over the internet. This is a deliberate teaching choice for this lab. Private tasks with NAT would cost more and add complexity without changing the architecture lesson.
+
+**Subnet layout (CIDR reference):**
+
+| Subnet | CIDR | AZ | Used by |
+|---|---|---|---|
+| Public A | `10.30.0.0/24` | AZ-a | ALB, Fargate tasks |
+| Public B | `10.30.1.0/24` | AZ-b | ALB, Fargate tasks |
+| Private A | `10.30.10.0/24` | AZ-a | Redis |
+| Private B | `10.30.11.0/24` | AZ-b | Redis |
+| DB A | `10.30.20.0/24` | AZ-a | RDS |
+| DB B | `10.30.21.0/24` | AZ-b | RDS |
+
+---
+
+### 0a. Create the VPC
+
+> **Console:** VPC → Your VPCs → **Create VPC**
+
+1. **Resources to create:** VPC only
+2. **Name tag:** `cineticket-vpc`
+3. **IPv4 CIDR block:** `10.30.0.0/16`
+4. **IPv6 CIDR block:** No IPv6 CIDR block
+5. **Tenancy:** Default
+6. Click **Create VPC**
+
+After creation:
+7. Select `cineticket-vpc` → **Actions → Edit VPC settings**
+8. Check both:
+   - **Enable DNS resolution** (DNS support)
+   - **Enable DNS hostnames**
+9. Click **Save**
+
+> Both DNS settings are required for Cloud Map private DNS (`cineticket.local`) to resolve service-discovery names.
+
+---
+
+### 0b. Create the Internet Gateway
+
+> **Console:** VPC → Internet Gateways → **Create internet gateway**
+
+1. **Name tag:** `cineticket-igw`
+2. Click **Create internet gateway**
+3. On the next screen, click **Actions → Attach to VPC** → select `cineticket-vpc` → **Attach internet gateway**
+
+---
+
+### 0c. Create the Six Subnets
+
+> **Console:** VPC → Subnets → **Create subnet**
+
+Select VPC: `cineticket-vpc`, then add all six subnets in one form (click **Add new subnet** after each):
+
+| Subnet name | Availability Zone | IPv4 CIDR |
+|---|---|---|
+| `cineticket-public-subnet-a` | `us-east-1a` | `10.30.0.0/24` |
+| `cineticket-public-subnet-b` | `us-east-1b` | `10.30.1.0/24` |
+| `cineticket-private-subnet-a` | `us-east-1a` | `10.30.10.0/24` |
+| `cineticket-private-subnet-b` | `us-east-1b` | `10.30.11.0/24` |
+| `cineticket-db-subnet-a` | `us-east-1a` | `10.30.20.0/24` |
+| `cineticket-db-subnet-b` | `us-east-1b` | `10.30.21.0/24` |
+
+Click **Create subnet**.
+
+**Enable auto-assign public IP on the two public subnets:**
+
+For each of `cineticket-public-subnet-a` and `cineticket-public-subnet-b`:
+1. Select the subnet → **Actions → Edit subnet settings**
+2. Check **Enable auto-assign public IPv4 address**
+3. Click **Save**
+
+---
+
+### 0d. Create the Public Route Table
+
+> **Console:** VPC → Route Tables → **Create route table**
+
+1. **Name:** `cineticket-public-rt`
+2. **VPC:** `cineticket-vpc`
+3. Click **Create route table**
+
+**Add the default route:**
+4. Select `cineticket-public-rt` → **Routes** tab → **Edit routes**
+5. Click **Add route:**
+   - Destination: `0.0.0.0/0`
+   - Target: **Internet Gateway** → select `cineticket-igw`
+6. Click **Save changes**
+
+**Associate both public subnets:**
+7. **Subnet associations** tab → **Edit subnet associations**
+8. Check both `cineticket-public-subnet-a` and `cineticket-public-subnet-b`
+9. Click **Save associations**
+
+> The private and DB subnets are intentionally left on the VPC's implicit main route table — local routing only. No explicit private route table is needed.
+
+---
+
 ## 1. Security Groups
 
 Security groups are created first because they reference each other (e.g., the Movie SG allows inbound port 8080 from *both* the ALB SG and the Booking SG). Create them in the order below.
@@ -53,7 +155,7 @@ Security groups are created first because they reference each other (e.g., the M
 
 1. **Security group name:** `cineticket-alb-sg`
 2. **Description:** `CineTicket ALB - allow HTTP from internet`
-3. **VPC:** select your CineTicket VPC
+3. **VPC:** select the VPC you created in §0 (`cineticket-vpc`)
 4. **Inbound rules → Add rule:**
    - Type: `HTTP` | Port: `80` | Source: `0.0.0.0/0`
    *(or lock to your classroom IP: `x.x.x.x/32`)*
@@ -67,7 +169,7 @@ Security groups are created first because they reference each other (e.g., the M
 
 1. **Security group name:** `cineticket-movie-sg`
 2. **Description:** `CineTicket Movie Service - allow 8080 from ALB and Booking Service`
-3. **VPC:** select your CineTicket VPC
+3. **VPC:** select the VPC you created in §0 (`cineticket-vpc`)
 4. **Inbound rules → Add two rules:**
    - Type: `Custom TCP` | Port: `8080` | Source: select `cineticket-alb-sg`
    - Type: `Custom TCP` | Port: `8080` | Source: select `cineticket-booking-sg`
@@ -83,7 +185,7 @@ Security groups are created first because they reference each other (e.g., the M
 
 1. **Security group name:** `cineticket-booking-sg`
 2. **Description:** `CineTicket Booking Service - allow 8080 from ALB`
-3. **VPC:** select your CineTicket VPC
+3. **VPC:** select the VPC you created in §0 (`cineticket-vpc`)
 4. **Inbound rules → Add rule:**
    - Type: `Custom TCP` | Port: `8080` | Source: select `cineticket-alb-sg`
 5. **Tags → Add tag:** `Name` = `cineticket-booking-sg`
@@ -105,7 +207,7 @@ The Movie Service is the only component that talks to Redis. Port 6379 is only o
 
 1. **Security group name:** `cineticket-redis-sg`
 2. **Description:** `CineTicket Redis - allow 6379 from Movie Service only`
-3. **VPC:** select your CineTicket VPC
+3. **VPC:** select the VPC you created in §0 (`cineticket-vpc`)
 4. **Inbound rules → Add rule:**
    - Type: `Custom TCP` | Port: `6379` | Source: select `cineticket-movie-sg`
 5. **Tags → Add tag:** `Name` = `cineticket-redis-sg`
@@ -119,7 +221,7 @@ The Booking Service is the only component that connects to PostgreSQL. Port 5432
 
 1. **Security group name:** `cineticket-rds-sg`
 2. **Description:** `CineTicket RDS - allow 5432 from Booking Service only`
-3. **VPC:** select your CineTicket VPC
+3. **VPC:** select the VPC you created in §0 (`cineticket-vpc`)
 4. **Inbound rules → Add rule:**
    - Type: `PostgreSQL` | Port: `5432` | Source: select `cineticket-booking-sg`
 5. **Tags → Add tag:** `Name` = `cineticket-rds-sg`
@@ -193,9 +295,9 @@ RDS lives in the DB subnets (local-route-only — no internet, no NAT). The Book
 
 1. **Name:** `cineticket-db-subnet-group`
 2. **Description:** `CineTicket RDS - DB subnets only`
-3. **VPC:** select your CineTicket VPC
+3. **VPC:** select the VPC you created in §0 (`cineticket-vpc`)
 4. **Availability Zones:** select all AZs that have a DB subnet
-5. **Subnets:** for each AZ, select the **DB** subnet (not private, not public — the isolated DB subnets from the VPC stack)
+5. **Subnets:** for each AZ, select the **DB** subnet (not private, not public — `cineticket-db-subnet-a` and `cineticket-db-subnet-b` from §0)
 6. Click **Create**
 
 ---
@@ -220,7 +322,7 @@ RDS lives in the DB subnets (local-route-only — no internet, no NAT). The Book
     - Enable storage autoscaling: **unchecked**
 11. **Availability & durability:** Single DB instance (not Multi-AZ)
 12. **Connectivity:**
-    - VPC: select your CineTicket VPC
+    - VPC: select `cineticket-vpc` (created in §0)
     - DB subnet group: `cineticket-db-subnet-group`
     - Public access: **No**
     - VPC security group: remove `default` → add `cineticket-rds-sg`
@@ -267,8 +369,8 @@ The Movie Service uses Redis as a cache-aside layer in front of DynamoDB. It sto
 
 1. **Name:** `cineticket-redis-subnet-group`
 2. **Description:** `CineTicket Redis - private subnets`
-3. **VPC:** select your CineTicket VPC
-4. **Subnets:** select both **private** subnets (not DB, not public — the private subnets from the VPC stack)
+3. **VPC:** select the VPC you created in §0 (`cineticket-vpc`)
+4. **Subnets:** select both **private** subnets (not DB, not public — `cineticket-private-subnet-a` and `cineticket-private-subnet-b` from §0)
 5. Click **Create**
 
 ---
@@ -725,7 +827,7 @@ Create the target groups first — the ALB listener rules reference them.
 1. **Target type:** IP addresses *(Fargate uses the ENI IP — not instance IDs)*
 2. **Target group name:** `cineticket-movie-tg`
 3. **Protocol:** HTTP | **Port:** `8080`
-4. **VPC:** select your CineTicket VPC
+4. **VPC:** select `cineticket-vpc` (created in §0)
 5. **Health checks:**
    - Protocol: HTTP
    - Path: `/health`
@@ -748,7 +850,7 @@ Create the target groups first — the ALB listener rules reference them.
 1. **Target type:** IP addresses
 2. **Target group name:** `cineticket-booking-tg`
 3. **Protocol:** HTTP | **Port:** `8080`
-4. **VPC:** select your CineTicket VPC
+4. **VPC:** select `cineticket-vpc` (created in §0)
 5. **Health checks:** same as §11a (`/health`, interval 30, threshold 2/3) — change the default `/` path to `/health`
 6. Click **Next** → **Create target group**
 
@@ -764,8 +866,8 @@ Create the target groups first — the ALB listener rules reference them.
    > **Common mistake:** The first option in the scheme list is "Internal" — selecting it creates an ALB reachable only from inside the VPC. The browser and the S3 web UI cannot reach an internal ALB. Select **Internet-facing**.
 3. **IP address type:** IPv4
 4. **Network mapping:**
-   - VPC: select your CineTicket VPC
-   - Mappings: tick both AZs → for each, select a **public** subnet
+   - VPC: select `cineticket-vpc` (created in §0)
+   - Mappings: tick both AZs → for each, select a **public** subnet (`cineticket-public-subnet-a` and `cineticket-public-subnet-b`)
 5. **Security groups:** remove `default` → add `cineticket-alb-sg`
 6. **Listeners and routing:**
    - Protocol: HTTP | Port: 80
@@ -924,7 +1026,7 @@ Services keep the desired number of tasks running and register them with the ALB
 7. **Desired tasks:** `1`
 
 **Step 3 — Networking:**
-8. **VPC:** select your CineTicket VPC
+8. **VPC:** select `cineticket-vpc` (created in §0)
 9. **Subnets:** select **both public subnets**
 10. **Security group:** remove default → select `cineticket-movie-sg`
 11. **Public IP:** ENABLED
@@ -956,7 +1058,7 @@ Services keep the desired number of tasks running and register them with the ALB
 7. **Desired tasks:** `1`
 
 **Step 3 — Networking:**
-8. **VPC:** select your CineTicket VPC
+8. **VPC:** select `cineticket-vpc` (created in §0)
 9. **Subnets:** select **both public subnets**
 10. **Security group:** remove default → select `cineticket-booking-sg`
 11. **Public IP:** ENABLED
@@ -1561,8 +1663,13 @@ docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-bookings:lat
 
    | Parameter | Value |
    |---|---|
-   | **VpcStackName** | Name of your deployed VPC stack (e.g. `VPCs`) |
-   | **VpcName** | The `Vpc1Name` value from the VPC stack (default `VPC1`) |
+   | **VpcCidr** | `10.30.0.0/16` (default — change only if it conflicts with existing VPCs in your account) |
+   | **PublicSubnetACidr** | `10.30.0.0/24` (default) |
+   | **PublicSubnetBCidr** | `10.30.1.0/24` (default) |
+   | **PrivateSubnetACidr** | `10.30.10.0/24` (default) |
+   | **PrivateSubnetBCidr** | `10.30.11.0/24` (default) |
+   | **DbSubnetACidr** | `10.30.20.0/24` (default) |
+   | **DbSubnetBCidr** | `10.30.21.0/24` (default) |
    | **MovieImageUri** | `123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-movies:latest` |
    | **BookingImageUri** | `123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-bookings:latest` |
    | **NotificationEmail** | Your SES-verified email address |

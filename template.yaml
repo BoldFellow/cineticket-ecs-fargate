@@ -13,15 +13,40 @@ Description: >
 
 Parameters:
 
-  VpcStackName:
+  VpcCidr:
     Type: String
-    Description: Name of the VPC CloudFormation stack to import subnets and VPC ID from.
-    Default: vpc-stack
+    Description: CIDR block for the CineTicket VPC.
+    Default: "10.30.0.0/16"
 
-  VpcName:
+  PublicSubnetACidr:
     Type: String
-    Description: Vpc1Name value used when the VPC stack was deployed (used in export names).
-    Default: VPC1
+    Description: CIDR for Public Subnet A (ALB + Fargate tasks, AZ-a).
+    Default: "10.30.0.0/24"
+
+  PublicSubnetBCidr:
+    Type: String
+    Description: CIDR for Public Subnet B (ALB + Fargate tasks, AZ-b).
+    Default: "10.30.1.0/24"
+
+  PrivateSubnetACidr:
+    Type: String
+    Description: CIDR for Private Subnet A (Redis, AZ-a).
+    Default: "10.30.10.0/24"
+
+  PrivateSubnetBCidr:
+    Type: String
+    Description: CIDR for Private Subnet B (Redis, AZ-b).
+    Default: "10.30.11.0/24"
+
+  DbSubnetACidr:
+    Type: String
+    Description: CIDR for DB Subnet A (RDS, AZ-a).
+    Default: "10.30.20.0/24"
+
+  DbSubnetBCidr:
+    Type: String
+    Description: CIDR for DB Subnet B (RDS, AZ-b).
+    Default: "10.30.21.0/24"
 
   MovieImageUri:
     Type: String
@@ -67,14 +92,129 @@ Parameters:
 
 Resources:
 
+  # ====== NETWORK — VPC, SUBNETS, IGW, ROUTE TABLE ======
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: cineticket-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: cineticket-igw
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: cineticket-public-subnet-a
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: cineticket-public-subnet-b
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: cineticket-private-subnet-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: cineticket-private-subnet-b
+
+  DbSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref DbSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: cineticket-db-subnet-a
+
+  DbSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref DbSubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: cineticket-db-subnet-b
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: cineticket-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+
   # ====== SECURITY GROUPS ======
 
   AlbSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: CineTicket ALB - allow HTTP from internet
-      VpcId: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -88,8 +228,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: CineTicket Movie Service - allow 8080 from ALB and Booking Service
-      VpcId: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 8080
@@ -107,8 +246,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: CineTicket Booking Service - allow 8080 from ALB
-      VpcId: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 8080
@@ -122,8 +260,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: CineTicket Redis - allow 6379 from Movie Service only
-      VpcId: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 6379
@@ -137,8 +274,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: CineTicket RDS - allow 5432 from Booking Service only
-      VpcId: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 5432
@@ -187,10 +323,8 @@ Resources:
     Properties:
       DBSubnetGroupDescription: CineTicket RDS subnet group
       SubnetIds:
-        - !ImportValue
-          Fn::Sub: "${VpcStackName}-${VpcName}-DbSubnetAId"
-        - !ImportValue
-          Fn::Sub: "${VpcStackName}-${VpcName}-DbSubnetBId"
+        - !Ref DbSubnetA
+        - !Ref DbSubnetB
 
   DBSecret:
     Type: AWS::SecretsManager::Secret
@@ -239,10 +373,8 @@ Resources:
     Properties:
       Description: CineTicket Redis subnet group
       SubnetIds:
-        - !ImportValue
-          Fn::Sub: "${VpcStackName}-${VpcName}-PrivateSubnetAId"
-        - !ImportValue
-          Fn::Sub: "${VpcStackName}-${VpcName}-PrivateSubnetBId"
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
 
   RedisCluster:
     Type: AWS::ElastiCache::CacheCluster
@@ -387,20 +519,6 @@ Resources:
       Enabled: true
 
 
-  # ====== CLOUDWATCH LOG GROUPS ======
-
-  MovieServiceLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: /ecs/cineticket-movies
-      RetentionInDays: 14
-
-  BookingServiceLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: /ecs/cineticket-bookings
-      RetentionInDays: 14
-
 
   # ====== ECS — IAM ROLES ======
 
@@ -419,6 +537,14 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: cineticket-execution-logs-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: arn:aws:logs:*:*:*
 
   MovieTaskRole:
     # Used by the Movie Service container code (DynamoDB reads + Redis).
@@ -488,8 +614,7 @@ Resources:
     Type: AWS::ServiceDiscovery::PrivateDnsNamespace
     Properties:
       Name: cineticket.local
-      Vpc: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      Vpc: !Ref Vpc
 
   MovieDiscoveryService:
     Type: AWS::ServiceDiscovery::Service
@@ -547,9 +672,10 @@ Resources:
           LogConfiguration:
             LogDriver: awslogs
             Options:
-              awslogs-group: !Ref MovieServiceLogGroup
+              awslogs-group: /ecs/cineticket-movies
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: movie
+              awslogs-create-group: "true"
           HealthCheck:
             Command: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\" || exit 1"]
             Interval: 30
@@ -590,9 +716,10 @@ Resources:
           LogConfiguration:
             LogDriver: awslogs
             Options:
-              awslogs-group: !Ref BookingServiceLogGroup
+              awslogs-group: /ecs/cineticket-bookings
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: booking
+              awslogs-create-group: "true"
           HealthCheck:
             Command: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\" || exit 1"]
             Interval: 30
@@ -612,10 +739,8 @@ Resources:
       SecurityGroups:
         - !Ref AlbSG
       Subnets:
-        - !ImportValue
-          Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetAId"
-        - !ImportValue
-          Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetBId"
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
 
   MovieTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -624,8 +749,7 @@ Resources:
       Port: 8080
       Protocol: HTTP
       TargetType: ip
-      VpcId: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      VpcId: !Ref Vpc
       HealthCheckPath: /health
       HealthCheckIntervalSeconds: 30
       HealthyThresholdCount: 2
@@ -638,8 +762,7 @@ Resources:
       Port: 8080
       Protocol: HTTP
       TargetType: ip
-      VpcId: !ImportValue
-        Fn::Sub: "${VpcStackName}-${VpcName}-VpcId"
+      VpcId: !Ref Vpc
       HealthCheckPath: /health
       HealthCheckIntervalSeconds: 30
       HealthyThresholdCount: 2
@@ -698,10 +821,8 @@ Resources:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
           Subnets:
-            - !ImportValue
-              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetAId"
-            - !ImportValue
-              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetBId"
+            - !Ref PublicSubnetA
+            - !Ref PublicSubnetB
           SecurityGroups:
             - !Ref MovieSG
       LoadBalancers:
@@ -724,10 +845,8 @@ Resources:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
           Subnets:
-            - !ImportValue
-              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetAId"
-            - !ImportValue
-              Fn::Sub: "${VpcStackName}-${VpcName}-PublicSubnetBId"
+            - !Ref PublicSubnetA
+            - !Ref PublicSubnetB
           SecurityGroups:
             - !Ref BookingSG
       LoadBalancers:
@@ -799,6 +918,34 @@ Resources:
 # ====================================================================
 
 Outputs:
+
+  VpcId:
+    Description: CineTicket VPC ID.
+    Value: !Ref Vpc
+
+  PublicSubnetAId:
+    Description: Public Subnet A ID (AZ-a) — ALB and Fargate tasks.
+    Value: !Ref PublicSubnetA
+
+  PublicSubnetBId:
+    Description: Public Subnet B ID (AZ-b) — ALB and Fargate tasks.
+    Value: !Ref PublicSubnetB
+
+  PrivateSubnetAId:
+    Description: Private Subnet A ID (AZ-a) — Redis.
+    Value: !Ref PrivateSubnetA
+
+  PrivateSubnetBId:
+    Description: Private Subnet B ID (AZ-b) — Redis.
+    Value: !Ref PrivateSubnetB
+
+  DbSubnetAId:
+    Description: DB Subnet A ID (AZ-a) — RDS.
+    Value: !Ref DbSubnetA
+
+  DbSubnetBId:
+    Description: DB Subnet B ID (AZ-b) — RDS.
+    Value: !Ref DbSubnetB
 
   AlbDnsName:
     Description: >
