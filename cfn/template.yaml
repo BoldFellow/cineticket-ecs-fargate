@@ -92,7 +92,7 @@ Parameters:
 
 Resources:
 
-  # ====== NETWORK — VPC, SUBNETS, IGW, ROUTE TABLE ======
+  # ====== NETWORK  -  VPC, SUBNETS, IGW, ROUTE TABLE ======
 
   Vpc:
     Type: AWS::EC2::VPC
@@ -285,7 +285,7 @@ Resources:
           Value: cineticket-rds-sg
 
 
-  # ====== DATA STORES — DYNAMODB ======
+  # ====== DATA STORES  -  DYNAMODB ======
 
   MoviesTable:
     Type: AWS::DynamoDB::Table
@@ -316,7 +316,7 @@ Resources:
           KeyType: RANGE
 
 
-  # ====== DATA STORES — RDS POSTGRESQL ======
+  # ====== DATA STORES  -  RDS POSTGRESQL ======
 
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -366,7 +366,7 @@ Resources:
       TargetType: AWS::RDS::DBInstance
 
 
-  # ====== DATA STORES — ELASTICACHE REDIS ======
+  # ====== DATA STORES  -  ELASTICACHE REDIS ======
 
   RedisSubnetGroup:
     Type: AWS::ElastiCache::SubnetGroup
@@ -388,7 +388,7 @@ Resources:
         - !Ref RedisSG
 
 
-  # ====== MESSAGING — SNS + SQS ======
+  # ====== MESSAGING  -  SNS + SQS ======
 
   OrderPlacedTopic:
     Type: AWS::SNS::Topic
@@ -520,7 +520,7 @@ Resources:
 
 
 
-  # ====== ECS — IAM ROLES ======
+  # ====== ECS  -  IAM ROLES ======
 
   ECSTaskExecutionRole:
     # Used by the ECS agent to pull images from ECR and write logs to CloudWatch.
@@ -601,9 +601,16 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Ref OrderPlacedTopic
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
 
 
-  # ====== ECS — CLUSTER & SERVICE DISCOVERY ======
+  # ====== ECS  -  CLUSTER & SERVICE DISCOVERY ======
 
   ECSCluster:
     Type: AWS::ECS::Cluster
@@ -637,7 +644,7 @@ Resources:
             TTL: 10
 
 
-  # ====== ECS — TASK DEFINITIONS ======
+  # ====== ECS  -  TASK DEFINITIONS ======
 
   MovieTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -728,7 +735,7 @@ Resources:
             StartPeriod: 60
 
 
-  # ====== ALB — LOAD BALANCER, TARGET GROUPS, ROUTING ======
+  # ====== ALB  -  LOAD BALANCER, TARGET GROUPS, ROUTING ======
 
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -806,7 +813,7 @@ Resources:
           TargetGroupArn: !Ref BookingTargetGroup
 
 
-  # ====== ECS — SERVICES ======
+  # ====== ECS  -  SERVICES ======
 
   MovieService:
     Type: AWS::ECS::Service
@@ -841,6 +848,7 @@ Resources:
       TaskDefinition: !Ref BookingTaskDefinition
       DesiredCount: 1
       LaunchType: FARGATE
+      EnableExecuteCommand: true
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
@@ -857,9 +865,9 @@ Resources:
         - RegistryArn: !GetAtt BookingDiscoveryService.Arn
 
 
-  # ====== AUTO SCALING — BOOKING SERVICE ======
+  # ====== AUTO SCALING  -  BOOKING SERVICE ======
   # Teaching point: Movie Service handles mostly reads (cache hits) so it stays at 1 task.
-  # Booking Service handles writes and RDS connections — scale it up when CPU hits 60%.
+  # Booking Service handles writes and RDS connections  -  scale it up when CPU hits 60%.
 
   BookingScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
@@ -924,27 +932,27 @@ Outputs:
     Value: !Ref Vpc
 
   PublicSubnetAId:
-    Description: Public Subnet A ID (AZ-a) — ALB and Fargate tasks.
+    Description: Public Subnet A ID (AZ-a)  -  ALB and Fargate tasks.
     Value: !Ref PublicSubnetA
 
   PublicSubnetBId:
-    Description: Public Subnet B ID (AZ-b) — ALB and Fargate tasks.
+    Description: Public Subnet B ID (AZ-b)  -  ALB and Fargate tasks.
     Value: !Ref PublicSubnetB
 
   PrivateSubnetAId:
-    Description: Private Subnet A ID (AZ-a) — Redis.
+    Description: Private Subnet A ID (AZ-a)  -  Redis.
     Value: !Ref PrivateSubnetA
 
   PrivateSubnetBId:
-    Description: Private Subnet B ID (AZ-b) — Redis.
+    Description: Private Subnet B ID (AZ-b)  -  Redis.
     Value: !Ref PrivateSubnetB
 
   DbSubnetAId:
-    Description: DB Subnet A ID (AZ-a) — RDS.
+    Description: DB Subnet A ID (AZ-a)  -  RDS.
     Value: !Ref DbSubnetA
 
   DbSubnetBId:
-    Description: DB Subnet B ID (AZ-b) — RDS.
+    Description: DB Subnet B ID (AZ-b)  -  RDS.
     Value: !Ref DbSubnetB
 
   AlbDnsName:
