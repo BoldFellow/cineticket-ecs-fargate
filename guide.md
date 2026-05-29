@@ -774,7 +774,7 @@ Expected output: `Login Succeeded`
 From the `CineTicket - ECS Fargate Microservices/` folder:
 
 ```bash
-docker build -t cineticket-movies ./service-movies
+docker build -t cineticket-movies ./app/services/movies
 
 docker tag cineticket-movies:latest \
   123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-movies:latest
@@ -789,7 +789,7 @@ Expected last line: `latest: digest: sha256:... size: ...`
 ### 9d. Build and Push the Booking Service Image
 
 ```bash
-docker build -t cineticket-bookings ./service-bookings
+docker build -t cineticket-bookings ./app/services/bookings
 
 docker tag cineticket-bookings:latest \
   123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-bookings:latest
@@ -1303,7 +1303,7 @@ Click **Save changes**. The **Permissions** tab header changes from "Bucket and 
 
 > **Console:** S3 → bucket → **Objects** tab → **Upload**
 
-1. Click **Add files** → select `web/index.html` from the project folder
+1. Click **Add files** → select `app/web/index.html` from the project folder
 2. Click **Upload**
 
 ---
@@ -1617,7 +1617,7 @@ Delete in this order (dependent groups first):
 
 ## Appendix A — CloudFormation Shortcut
 
-The template `template.yaml` in this folder automates everything in §1–§13 plus auto scaling into a single stack. Use it to skip the manual ClickOps steps and get to the seeding and testing stages faster.
+The template `cfn/template.yaml` in this repo automates everything in §1–§13 plus auto scaling into a single stack. Use it to skip the manual ClickOps steps and get to the seeding and testing stages faster.
 
 **What the template provisions:**
 All five security groups · both DynamoDB tables · Secrets Manager secret + SecretTargetAttachment (auto-populates RDS host/port into the secret) · RDS PostgreSQL + DB subnet group · ElastiCache Redis + Redis subnet group · SNS topic + SQS queue + SQS DLQ + SQS queue policy + SNS subscription · Lambda function with inline code · Lambda event source mapping · Task Execution Role + Movie Task Role + Booking Task Role + Lambda role · ECS Cluster · Movie task definition + Movie ECS service · Booking task definition + Booking ECS service · ALB + both target groups + HTTP listener + two routing rules · Application Auto Scaling on the Booking Service · CloudWatch log groups · S3 web bucket with static website hosting and public-read policy.
@@ -1627,7 +1627,7 @@ All five security groups · both DynamoDB tables · Secrets Manager secret + Sec
 - DynamoDB seed data (§15)
 - RDS schema (§16)
 - SES email verification (§17)
-- Uploading `web/index.html` to the S3 bucket (§18d)
+- Uploading `app/web/index.html` to the S3 bucket (§18d)
 
 ---
 
@@ -1644,11 +1644,11 @@ aws ecr create-repository --repository-name cineticket-bookings --region us-east
 aws ecr get-login-password --region us-east-1 | docker login --username AWS \
   --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
 
-docker build -t cineticket-movies ./service-movies
+docker build -t cineticket-movies ./app/services/movies
 docker tag cineticket-movies:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-movies:latest
 docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-movies:latest
 
-docker build -t cineticket-bookings ./service-bookings
+docker build -t cineticket-bookings ./app/services/bookings
 docker tag cineticket-bookings:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-bookings:latest
 docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-bookings:latest
 ```
@@ -1657,7 +1657,7 @@ docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/cineticket-bookings:lat
 
 > **Console:** CloudFormation → **Create stack** → With new resources (standard)
 
-1. Click **Upload a template file** → select `template.yaml` → **Next**
+1. Click **Upload a template file** → select `cfn/template.yaml` → **Next**
 2. **Stack name:** `cineticket`
 3. Fill in parameters:
 

@@ -33,13 +33,13 @@
 2. **Deploy this stack** — follow [guide.md](guide.md) for the full console walkthrough, or use the CFN shortcut (Appendix A in guide.md):
    ```bash
    aws cloudformation deploy \
-     --template-file template.yaml \
+     --template-file cfn/template.yaml \
      --stack-name cineticket \
      --capabilities CAPABILITY_IAM \
      --parameter-overrides VpcStackName=VPCs
    ```
 3. **Build and push container images** — see guide.md §7 (ECR) for the `docker build` + `docker push` commands
-4. **Bootstrap schema** — run the one-liner in guide.md §5 to apply `service-bookings/schema.sql` via ECS Exec
+4. **Bootstrap schema** — run the one-liner in guide.md §5 to apply `app/services/bookings/schema.sql` via ECS Exec
 
 ## What you'll destroy at cleanup
 
@@ -60,13 +60,13 @@ aws cloudformation delete-stack --stack-name cineticket
 | File | Purpose |
 |---|---|
 | `architecture.png` / `architecture.drawio` | System diagram |
-| `template.yaml` | CloudFormation template — full stack (Appendix A shortcut) |
+| `cfn/template.yaml` | CloudFormation template — full stack (Appendix A shortcut) |
 | `guide.md` | Full console walkthrough |
-| `service-movies/` | Movie Service — Flask app, Dockerfile, requirements |
-| `service-bookings/` | Booking Service — Flask app, Dockerfile, requirements, schema.sql |
-| `notification-lambda/lambda_function.py` | Lambda — sends booking confirmation emails via SES |
-| `web/index.html` | Static cinema booking web UI |
-| `web/app.zip` | Web UI deployment package |
+| `app/services/movies/` | Movie Service — Flask app, Dockerfile, requirements |
+| `app/services/bookings/` | Booking Service — Flask app, Dockerfile, requirements, schema.sql |
+| `app/lambdas/notification/lambda_function.py` | Lambda — sends booking confirmation emails via SES |
+| `app/web/index.html` | Static cinema booking web UI |
+| `app/web/app.zip` | Web UI deployment package |
 
 ## License
 
